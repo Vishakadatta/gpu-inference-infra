@@ -1,0 +1,23 @@
+# Results (generated data — add selectively if you want to commit specific runs)
+results/*.csv
+results/*.json
+
+# Environment files with secrets
+deploy/.env
+
+# Python
+__pycache__/
+*.pyc
+
+# Docker
+.docker/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

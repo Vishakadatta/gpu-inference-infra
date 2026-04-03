@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  vllm:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    env_file:
+      - .env
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
+    command: >
+      --model ${MODEL_NAME:-meta-llama/Meta-Llama-3-8B-Instruct}
+      --gpu-memory-utilization ${GPU_MEM_UTIL:-0.85}
+      --max-model-len ${MAX_MODEL_LEN:-4096}
+      --max-num-seqs ${MAX_NUM_SEQS:-8}
+      --dtype float16
+      --host 0.0.0.0
+      --port 8000
+    volumes:
+      - model-cache:/root/.cache/huggingface
+      - ../results:/opt/results
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ../monitoring/alert-rules.yml:/etc/prometheus/alert-rules.yml
+    depends_on:
+      - vllm
+    restart: unless-stopped
+
+volumes:
+  model-cache:
+    driver: local
