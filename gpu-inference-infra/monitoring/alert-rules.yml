@@ -1,0 +1,32 @@
+groups:
+  - name: vllm_inference_alerts
+    rules:
+      # Request latency is too high
+      - alert: HighInferenceLatency
+        expr: histogram_quantile(0.99, rate(vllm:request_latency_seconds_bucket[5m])) > 10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Inference p99 latency above 10s"
+          description: "p99 latency has been above 10 seconds for 2 minutes. Server may be overloaded."
+
+      # Request queue is backing up
+      - alert: RequestQueueBacklog
+        expr: vllm:num_requests_waiting > 20
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Request queue backlog > 20"
+          description: "More than 20 requests waiting. Consider scaling or reducing max_num_seqs."
+
+      # vLLM target is down
+      - alert: VLLMDown
+        expr: up{job="vllm"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "vLLM server is unreachable"
+          description: "Prometheus cannot scrape vLLM metrics. Server may have crashed."
