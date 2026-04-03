@@ -17,7 +17,7 @@ Infrastructure tooling for deploying and operating vLLM inference servers on GPU
 
 ```bash
 # On a fresh GPU machine (Ubuntu 22.04 + CUDA)
-git clone https://github.com/YOUR_USERNAME/gpu-inference-infra.git
+git clone https://github.com/Vishakadatta/gpu-inference-infra.git
 cd gpu-inference-infra
 
 make setup    # Install Docker, NVIDIA Container Toolkit
@@ -103,7 +103,7 @@ _Results will be populated after GPU testing in Phase 3._
 - No model version management or A/B serving
 - Load testing is synthetic, not production traffic patterns
 
-## What This Would Need at Scale (e.g. Midjourney)
+## What This Would Need at Scale
 
 - Load balancer distributing requests across GPU fleet
 - Model routing: different model versions on different GPUs
