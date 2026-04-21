@@ -23,12 +23,18 @@ services:
       --gpu-memory-utilization ${GPU_MEM_UTIL:-0.85}
       --max-model-len ${MAX_MODEL_LEN:-4096}
       --max-num-seqs ${MAX_NUM_SEQS:-8}
-      --dtype float16
+      --dtype ${DTYPE:-float16}
       --host 0.0.0.0
       --port 8000
     volumes:
       - model-cache:/root/.cache/huggingface
       - ../results:/opt/results
+      # Local model mount. When LOCAL_MODEL_PATH is set in .env, the setup
+      # wizard also writes MODEL_NAME=/model so vLLM loads from this mount
+      # instead of downloading from HuggingFace. When unset, it defaults to
+      # the deploy dir itself — harmless because vLLM never references /model
+      # in the HuggingFace flow.
+      - ${LOCAL_MODEL_PATH:-./}:/model:ro
     restart: unless-stopped
     logging:
       driver: json-file
