@@ -20,10 +20,38 @@ Infrastructure tooling for deploying and operating vLLM inference servers on GPU
 git clone https://github.com/Vishakadatta/gpu-inference-infra.git
 cd gpu-inference-infra
 
-make setup    # Install Docker, NVIDIA Container Toolkit
-make deploy   # Pull model, start vLLM + Prometheus
-make test     # Run load test suite
-make monitor  # Start GPU monitoring daemon
+make setup-node  # One-time: install Docker + NVIDIA Container Toolkit
+make setup       # Interactive wizard — picks a model, writes .env, launches
+make test        # Run load test suite
+make monitor     # Start GPU monitoring daemon
+```
+
+## Setup Wizard
+
+`make setup` runs an interactive wizard (`setup/setup.py`) so you never have
+to hand-edit `.env`. It:
+
+1. Checks Docker, the NVIDIA Container Toolkit, and GPU visibility from Docker.
+2. Detects available VRAM (`nvidia-smi` → `rocm-smi` → Apple `sysctl` →
+   `/proc/meminfo` → manual entry).
+3. Asks how you want to pick a model:
+   - **Suggest one based on VRAM** — chooses from a curated list of models
+     from Meta, Mistral AI, Google, or Microsoft that fit your budget.
+   - **HuggingFace name** — you type `org/model`. The wizard enforces a
+     vendor allowlist: Qwen, DeepSeek, Yi, THUDM, 01-ai, InternLM, Baichuan,
+     and ChatGLM are rejected.
+   - **Local model file** — point at a `.safetensors` directory or `.gguf`
+     file. The path is mounted read-only into the container at `/model`,
+     and vLLM is launched with `--model /model`. If you mark the model
+     proprietary, the path is added to `.gitignore`.
+4. Configures vLLM parameters (GPU mem util, max concurrent, max length, dtype).
+5. Writes `deploy/.env` and runs `make deploy`.
+
+Pass `--dry-run` to walk through the wizard without pulling models or
+starting containers:
+
+```bash
+python3 setup/setup.py --dry-run
 ```
 
 ## Architecture

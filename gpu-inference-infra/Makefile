@@ -1,10 +1,13 @@
-.PHONY: setup deploy test monitor health teardown logs clean help
+.PHONY: setup setup-node deploy test monitor health teardown logs clean help
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
-setup: ## Bootstrap a fresh GPU machine (Docker, NVIDIA toolkit)
+setup: ## Interactive setup wizard — detects GPU, picks model, writes .env, launches
+	@python3 setup/setup.py
+
+setup-node: ## Bootstrap a fresh GPU machine (Docker, NVIDIA toolkit)
 	@bash scripts/setup-gpu-node.sh
 
 deploy: ## Deploy vLLM inference server + Prometheus
@@ -33,6 +36,8 @@ logs: ## Tail vLLM server logs
 analyze: ## Analyze most recent load test results
 	@python3 loadtest/analyze.py $$(ls -t results/loadtest_*.json 2>/dev/null | head -1)
 
-clean: ## Remove all results data
+clean: ## Stop containers, remove .env and results
+	@cd deploy && docker-compose down 2>/dev/null || true
+	@rm -f deploy/.env
 	@rm -f results/*.csv results/*.json
-	@echo "Results cleaned."
+	@echo "Cleaned: containers stopped, deploy/.env removed, results cleared."
