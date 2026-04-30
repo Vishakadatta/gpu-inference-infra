@@ -1,395 +1,277 @@
 #!/usr/bin/env python3
-"""Interactive setup wizard for the vLLM GPU inference server.
+"""Interactive setup wizard for the GPU Inference Observatory.
 
-Flow:
-  1. Check prerequisites (Docker, NVIDIA Container Toolkit, GPU visible to Docker)
-  2. Detect VRAM (nvidia-smi -> rocm-smi -> sysctl -> /proc/meminfo -> manual)
-  3. Pick a model (suggestion / HuggingFace name / local file)
-  4. Configure vLLM parameters
-  5. Write deploy/.env and launch the server
+First question is always backend selection:
+  1. NIM Hosted API  — NVIDIA runs the GPU, you call their endpoint (free, no hardware)
+  2. NIM Container   — you run the NIM Docker container on your own GPU
 
-Run with --dry-run to walk through the wizard without pulling models or
-starting containers — useful for verifying the flow in CI or on a machine
-without a GPU.
+Both paths write deploy/.env and are ready to serve immediately after setup.
+
+Run with --dry-run to walk through without making API calls or starting containers.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-import shutil
-import subprocess
 import sys
+import webbrowser
 from pathlib import Path
 
-# Make `setup.models` / `setup.detect` importable both when invoked as a
-# module (`python -m setup.setup`) and as a script (`python setup/setup.py`).
+import httpx
+from rich.console import Console
+from rich.prompt import Confirm, Prompt
+
 _HERE = Path(__file__).resolve().parent
 if str(_HERE.parent) not in sys.path:
     sys.path.insert(0, str(_HERE.parent))
 
-from setup.detect import detect_vram, MANUAL_HINTS
 from setup.models import (
-    BLOCKED_ORIGINS,
-    POLICY_MSG,
-    is_blocked,
-    suggestions_for,
+    NIM_BASE,
+    NIM_DEFAULT_MODEL,
+    container_image,
 )
+from setup.nim_discover import discover_and_pick
 
-PROJECT_ROOT = _HERE.parent
-ENV_PATH = PROJECT_ROOT / "deploy" / ".env"
-COMPOSE_PATH = PROJECT_ROOT / "deploy" / "docker-compose.yml"
-GITIGNORE_PATH = PROJECT_ROOT / ".gitignore"
+console = Console()
 
-
-# ─────────────────────────── IO helpers ───────────────────────────
+PROJECT_ROOT   = _HERE.parent
+ENV_PATH       = PROJECT_ROOT / "deploy" / ".env"
 
 
-def banner(title: str) -> None:
-    print()
-    print("=" * 60)
-    print(f"  {title}")
-    print("=" * 60)
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
+def main() -> int:
+    ap = argparse.ArgumentParser(description="GPU Inference Observatory — setup wizard")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Walk through without making API calls or starting containers.")
+    args = ap.parse_args()
 
-def ask(prompt: str, default: str | None = None) -> str:
-    suffix = f" [{default}]" if default else ""
-    while True:
-        val = input(f"{prompt}{suffix}: ").strip()
-        if val:
-            return val
-        if default is not None:
-            return default
+    console.rule("[bold cyan]GPU Inference Observatory — Setup[/bold cyan]")
+    if args.dry_run:
+        console.print("[yellow](DRY RUN — no side effects)[/yellow]\n")
 
+    console.print(
+        "\n[bold]Which backend do you want to use?[/bold]\n\n"
+        "  [cyan]1.[/cyan]  NIM Hosted API   — NVIDIA runs the GPU for you  "
+        "(free, no hardware needed)\n"
+        "  [cyan]2.[/cyan]  NIM Container    — run the NIM container on your own GPU  "
+        "(full GPU metrics)\n"
+    )
+    choice = Prompt.ask("Choice", choices=["1", "2"], default="1")
 
-def ask_yn(prompt: str, default: bool = True) -> bool:
-    hint = "[Y/n]" if default else "[y/N]"
-    while True:
-        raw = input(f"{prompt} {hint}: ").strip().lower()
-        if not raw:
-            return default
-        if raw in ("y", "yes"):
-            return True
-        if raw in ("n", "no"):
-            return False
-
-
-def fatal(msg: str) -> None:
-    print(f"\nFATAL: {msg}\n", file=sys.stderr)
-    sys.exit(1)
-
-
-# ─────────────────────────── Step 1: prereqs ───────────────────────────
-
-
-def _run(cmd: list[str]) -> tuple[int, str]:
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        return r.returncode, (r.stdout + r.stderr)
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        return 127, str(e)
-
-
-def check_prereqs(dry_run: bool) -> None:
-    banner("Step 1: Checking prerequisites")
-
-    if not shutil.which("docker"):
-        print("Docker is not installed.")
-        print("  macOS:   https://docs.docker.com/desktop/install/mac-install/")
-        print("  Linux:   curl -fsSL https://get.docker.com | sh")
-        print("  Windows: https://docs.docker.com/desktop/install/windows-install/")
-        if dry_run:
-            print("  [dry-run] Continuing past missing-Docker error.")
-        else:
-            fatal("Install Docker, then rerun this wizard.")
-    else:
-        code, _ = _run(["docker", "info"])
-        if code != 0:
-            if dry_run:
-                print("  [dry-run] Docker daemon is not running — would fatal in a real run.")
-            else:
-                fatal("Docker is installed but the daemon is not running. Start Docker and rerun.")
-        else:
-            print("  [OK] Docker is installed and running.")
-
-    # NVIDIA Container Toolkit — only strictly required when an NVIDIA GPU is present.
-    has_nvidia_smi = shutil.which("nvidia-smi") is not None
-    if has_nvidia_smi:
-        code, out = _run(["docker", "info"])
-        if "nvidia" not in out.lower():
-            print("  [WARN] NVIDIA Container Toolkit may not be installed.")
-            print("         Install guide: https://docs.nvidia.com/datacenter/cloud-native/"
-                  "container-toolkit/latest/install-guide.html")
-            if not dry_run and not ask_yn("  Continue anyway?", default=False):
-                fatal("Install NVIDIA Container Toolkit and rerun.")
-        else:
-            print("  [OK] NVIDIA Container Toolkit detected.")
-
-        if dry_run:
-            print("  [dry-run] Skipping 'docker run --gpus all nvidia-smi' check.")
-        else:
-            print("  Testing GPU visibility from Docker (this pulls a small CUDA image)...")
-            code, out = _run([
-                "docker", "run", "--rm", "--gpus", "all",
-                "nvidia/cuda:12.1.0-base-ubuntu22.04", "nvidia-smi",
-            ])
-            if code != 0:
-                print(out.strip()[-500:])
-                print("\nTroubleshooting:")
-                print("  - Confirm 'nvidia-smi' works on the host.")
-                print("  - Confirm nvidia-container-toolkit is installed and Docker was restarted.")
-                print("  - On Linux: sudo systemctl restart docker")
-                fatal("Docker cannot see the GPU.")
-            print("  [OK] Docker can see the GPU.")
-    else:
-        print("  [WARN] No nvidia-smi found — skipping NVIDIA toolkit + GPU visibility checks.")
-        print("         This machine will not be able to run GPU inference.")
-
-
-# ─────────────────────────── Step 2: VRAM ───────────────────────────
-
-
-def detect_or_ask_vram() -> tuple[int, str]:
-    banner("Step 2: Detecting VRAM")
-    gb, source = detect_vram()
-    if gb:
-        print(f"  Detected: {source} — {gb} GB")
-        return gb, source
-    print("  Auto-detection failed.")
-    print(MANUAL_HINTS)
-    while True:
-        raw = ask("Enter available VRAM in GB (integer)")
-        try:
-            val = int(raw)
-            if val > 0:
-                return val, "manual entry"
-        except ValueError:
-            pass
-        print("  Please enter a positive integer.")
-
-
-# ─────────────────────────── Step 3: model selection ───────────────────
-
-
-def pick_model(vram_gb: int) -> dict:
-    banner("Step 3: Select a model")
-    print("How do you want to select a model?")
-    print("  1. Suggest one based on my VRAM (recommended)")
-    print("  2. I know which HuggingFace model I want")
-    print("  3. I have a local model file on this machine")
-    choice = ask("Choice [1-3]", default="1")
     if choice == "1":
-        return _option_suggest(vram_gb)
-    if choice == "2":
-        return _option_huggingface(vram_gb)
-    if choice == "3":
-        return _option_local(vram_gb)
-    print("  Invalid choice.")
-    return pick_model(vram_gb)
+        return _run_hosted(args.dry_run)
+    return _run_container(args.dry_run)
 
 
-def _option_suggest(vram_gb: int) -> dict:
-    choices = suggestions_for(vram_gb)
-    if not choices:
-        print(f"  No suggested model fits in {vram_gb} GB. Falling back to manual entry.")
-        return _option_huggingface(vram_gb)
+# ---------------------------------------------------------------------------
+# Path 1: NIM Hosted API
+# ---------------------------------------------------------------------------
 
-    print(f"\n  Suggested Models ({vram_gb} GB VRAM detected)")
-    print("  " + "-" * 58)
-    print(f"  {'#':>2}  {'Model':<28} {'VRAM':<6} {'Origin'}")
-    print("  " + "-" * 58)
-    for i, (_, display, v, origin) in enumerate(choices, 1):
-        print(f"  {i:>2}  {display:<28} {v:>3} GB  {origin}")
-    print("  " + "-" * 58)
-    while True:
-        raw = ask(f"Which model? [1-{len(choices)}]", default="1")
-        try:
-            idx = int(raw) - 1
-            if 0 <= idx < len(choices):
-                break
-        except ValueError:
-            pass
-        print("  Invalid selection.")
-    hf_name, display, v, origin = choices[idx]
-    print(f"  Selected: {display} ({hf_name}) — {v} GB")
-    token = _ask_hf_token()
-    return {
-        "model_name": hf_name,
-        "hf_token": token,
-        "local_path": None,
-        "model_vram_gb": v,
-    }
+def _run_hosted(dry_run: bool) -> int:
+    console.print(
+        "\n[bold]NIM Hosted API[/bold]\n"
+        "NVIDIA runs powerful models on their DGX Cloud — you call their endpoint.\n"
+        "Free tier: 1,000 credits on signup (up to 5,000 on request). No GPU needed.\n\n"
+        "To get your free API key:\n"
+        "  1. Go to [cyan]https://build.nvidia.com[/cyan]\n"
+        "  2. Sign in or create a free account\n"
+        "  3. Click your profile icon → [bold]API Keys → Generate API Key[/bold]\n"
+        "  4. Copy the key  (starts with [bold]nvapi-[/bold])\n"
+    )
 
-
-def _option_huggingface(vram_gb: int) -> dict:
-    while True:
-        hf_name = ask("Enter the HuggingFace model name "
-                      "(e.g. mistralai/Mistral-7B-Instruct-v0.3)")
-        if is_blocked(hf_name):
-            print(f"  {POLICY_MSG}")
-            print(f"  Blocked origins: {', '.join(BLOCKED_ORIGINS)}")
-            continue
-        break
-    token = _ask_hf_token()
-    print(f"\n  WARN: We cannot verify VRAM compatibility for custom models.")
-    print(f"        Ensure your model fits within {vram_gb} GB.")
-    if not ask_yn("  Proceed?", default=True):
-        return pick_model(vram_gb)
-    return {
-        "model_name": hf_name,
-        "hf_token": token,
-        "local_path": None,
-        "model_vram_gb": None,
-    }
-
-
-def _option_local(vram_gb: int) -> dict:
-    while True:
-        raw = ask("Enter the full path to your model file or directory "
-                  "(e.g. /home/user/models/my-model or .../my-model.gguf)")
-        p = Path(raw).expanduser().resolve()
-        if not p.exists():
-            print(f"  Path not found: {p}")
-            continue
-        if not (p.is_file() or p.is_dir()):
-            print(f"  Not a regular file or directory: {p}")
-            continue
-        break
-    print(f"\n  vLLM supports safetensors and GGUF formats.")
-    print(f"  Ensure your model fits within {vram_gb} GB VRAM.")
-    print(f"\n  The path will be mounted read-only into the container at /model,")
-    print(f"  and vLLM will be launched with --model /model.")
-
-    if ask_yn("Is this model proprietary/confidential? (adds path to .gitignore)",
-              default=False):
-        _add_gitignore(str(p))
-    return {
-        "model_name": "/model",
-        "hf_token": "",
-        "local_path": str(p),
-        "model_vram_gb": None,
-    }
-
-
-def _ask_hf_token() -> str:
-    print("\n  HuggingFace token is needed to download gated models (e.g. Llama 3).")
-    print("  Get yours at: https://huggingface.co/settings/tokens")
-    return ask("HuggingFace token (press Enter to skip if model is not gated)",
-               default="")
-
-
-def _add_gitignore(path: str) -> None:
-    GITIGNORE_PATH.touch(exist_ok=True)
-    current = GITIGNORE_PATH.read_text()
-    entry = f"\n# Proprietary model path (added by setup wizard)\n{path}\n"
-    if path in current:
-        print(f"  {path} already in .gitignore")
-        return
-    GITIGNORE_PATH.write_text(current + entry)
-    print(f"  Added to .gitignore: {path}")
-
-
-# ─────────────────────────── Step 4: vLLM params ───────────────────────
-
-
-def configure_vllm() -> dict:
-    banner("Step 4: vLLM configuration")
-    defaults = {
-        "GPU_MEM_UTIL": "0.85",
-        "MAX_NUM_SEQS": "8",
-        "MAX_MODEL_LEN": "4096",
-        "DTYPE": "float16",
-    }
-    print("  GPU Memory Utilization: 0.85 (85% of VRAM)")
-    print("  Max Concurrent Requests: 8")
-    print("  Max Sequence Length:     4096")
-    print("  Data Type:               float16")
-    if ask_yn("\n  Use these defaults?", default=True):
-        return defaults
-    return {
-        "GPU_MEM_UTIL": ask(
-            "  GPU memory utilization (0.0-1.0): fraction of VRAM vLLM may use",
-            default=defaults["GPU_MEM_UTIL"]),
-        "MAX_NUM_SEQS": ask(
-            "  Max concurrent requests: higher = more throughput, more VRAM",
-            default=defaults["MAX_NUM_SEQS"]),
-        "MAX_MODEL_LEN": ask(
-            "  Max sequence length (prompt + output tokens)",
-            default=defaults["MAX_MODEL_LEN"]),
-        "DTYPE": ask(
-            "  Data type (float16 / bfloat16 / float32)",
-            default=defaults["DTYPE"]),
-    }
-
-
-# ─────────────────────────── Step 5: write + launch ────────────────────
-
-
-def write_env(model: dict, vllm: dict, dry_run: bool) -> None:
-    banner("Step 5: Writing configuration")
-    lines = [
-        "# Generated by setup/setup.py — do not edit by hand.",
-        f"MODEL_NAME={model['model_name']}",
-        f"HF_TOKEN={model['hf_token']}",
-        f"GPU_MEM_UTIL={vllm['GPU_MEM_UTIL']}",
-        f"MAX_NUM_SEQS={vllm['MAX_NUM_SEQS']}",
-        f"MAX_MODEL_LEN={vllm['MAX_MODEL_LEN']}",
-        f"DTYPE={vllm['DTYPE']}",
-    ]
-    if model["local_path"]:
-        lines.append(f"LOCAL_MODEL_PATH={model['local_path']}")
-    content = "\n".join(lines) + "\n"
+    api_key = _prompt_and_validate_key(dry_run)
+    if not api_key:
+        return 1
 
     if dry_run:
-        print(f"  [dry-run] Would write {ENV_PATH}:")
-        print("  " + content.replace("\n", "\n  "))
+        model = NIM_DEFAULT_MODEL
+        console.print(f"  [dim][dry-run] Would discover models. Using default: {model}[/dim]")
+    else:
+        model = discover_and_pick(api_key)
+        if not model:
+            return 1
+
+    _write_env_hosted(api_key, model, dry_run)
+
+    console.rule("[green]Setup complete[/green]")
+    console.print(f"  Backend:  NIM Hosted API")
+    console.print(f"  Model:    {model}")
+    console.print(f"  Endpoint: {NIM_BASE}")
+    console.print(
+        "\n  Next steps:\n"
+        "    [bold]make test[/bold]    — load test against NIM hosted API\n"
+        "    [bold]make health[/bold]  — verify NIM connectivity\n"
+        "    [bold]make web[/bold]     — start the observatory web UI\n"
+        "\n  [dim]deploy/.env holds your API key — never commit it.[/dim]"
+    )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Path 2: NIM Container (self-hosted GPU)
+# ---------------------------------------------------------------------------
+
+def _run_container(dry_run: bool) -> int:
+    console.print(
+        "\n[bold]NIM Container  (self-hosted)[/bold]\n"
+        "Run the NVIDIA NIM Docker container on your own GPU.\n"
+        "Gives you [bold]full GPU metrics[/bold]: "
+        "VRAM, temperature, KV cache, queue depth.\n\n"
+        "Requirements:\n"
+        "  · NVIDIA GPU  (A10G 24 GB minimum for 8B models)\n"
+        "  · Docker + NVIDIA Container Toolkit installed\n"
+        "  · Free NGC API key from [cyan]https://build.nvidia.com[/cyan]\n"
+    )
+
+    api_key = _prompt_and_validate_key(dry_run)
+    if not api_key:
+        return 1
+
+    # VRAM detection
+    from setup.detect import detect_vram
+    vram_gb, vram_source = detect_vram()
+    if vram_gb:
+        console.print(f"\n  Detected: {vram_source} — [bold]{vram_gb} GB[/bold]")
+    else:
+        console.print(f"\n  [yellow]Could not auto-detect VRAM.[/yellow]")
+        vram_gb = int(Prompt.ask("  Enter available VRAM in GB", default="24"))
+
+    # Model discovery — same live catalogue as hosted path
+    if dry_run:
+        model = NIM_DEFAULT_MODEL
+        console.print(f"  [dim][dry-run] Using default model: {model}[/dim]")
+    else:
+        model = discover_and_pick(api_key)
+        if not model:
+            return 1
+
+    image = container_image(model)
+    console.print(f"\n  Container image: [bold]{image}[/bold]")
+
+    if not dry_run:
+        console.print(
+            "\n  [yellow]IMPORTANT:[/yellow] You must accept the NIM container license "
+            "on NGC before the docker pull will succeed.\n"
+            "  Visit [cyan]https://catalog.ngc.nvidia.com/orgs/nim/[/cyan], "
+            "find your model, and click 'Agree to License'.\n"
+        )
+        if not Confirm.ask("  Have you accepted the license?", default=False):
+            console.print(
+                "\n  Accept the license first, then re-run setup.\n"
+            )
+            return 1
+
+    _write_env_container(api_key, model, vram_gb, dry_run)
+
+    console.rule("[green]Setup complete[/green]")
+    console.print(f"  Backend:  NIM Container (self-hosted)")
+    console.print(f"  Model:    {model}")
+    console.print(f"  Image:    {image}")
+    console.print(f"  VRAM:     {vram_gb} GB")
+    console.print(
+        "\n  Next steps:\n"
+        "    [bold]make deploy[/bold]   — pull NIM container + start Prometheus + DCGM\n"
+        "    [bold]make health[/bold]   — wait for model load, validate all checks\n"
+        "    [bold]make test[/bold]     — full load test sweep  (saves to results/)\n"
+        "    [bold]make monitor[/bold]  — start GPU metrics daemon\n"
+        "\n  [dim]deploy/.env holds your NGC key — never commit it.[/dim]"
+    )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Shared: API key prompt + validation
+# ---------------------------------------------------------------------------
+
+def _prompt_and_validate_key(dry_run: bool) -> str | None:
+    if dry_run:
+        console.print("  [dim][dry-run] Skipping key prompt + validation.[/dim]")
+        return "nvapi-dry-run-placeholder"
+
+    while True:
+        key = Prompt.ask(
+            "  Paste your API key  (or press Enter to open browser)"
+        ).strip()
+
+        if not key:
+            console.print("  Opening [cyan]https://build.nvidia.com[/cyan] in your browser…")
+            webbrowser.open("https://build.nvidia.com")
+            continue
+
+        if not key.startswith("nvapi-"):
+            console.print(
+                "  [yellow]Key should start with 'nvapi-'. "
+                "Double-check and try again.[/yellow]"
+            )
+            continue
+
+        console.print("  Validating key…")
+        try:
+            r = httpx.get(
+                f"{NIM_BASE}/models",
+                headers={"Authorization": f"Bearer {key}"},
+                timeout=15.0,
+            )
+            if r.status_code == 200:
+                console.print("  [green]Key valid ✓[/green]")
+                return key
+            if r.status_code in (401, 403):
+                console.print(
+                    "  [red]Invalid key (401). Check the key and try again.[/red]"
+                )
+                continue
+            console.print(f"  [red]Unexpected HTTP {r.status_code}.[/red]")
+        except httpx.HTTPError as e:
+            console.print(f"  [red]Network error: {e}[/red]")
+
+        if not Confirm.ask("  Retry?", default=True):
+            return None
+
+
+# ---------------------------------------------------------------------------
+# .env writers
+# ---------------------------------------------------------------------------
+
+def _write_env_hosted(api_key: str, model: str, dry_run: bool) -> None:
+    _write_env([
+        "# Generated by setup/setup.py — do not commit this file.",
+        "BACKEND=nim-hosted",
+        f"NVIDIA_API_KEY={api_key}",
+        f"NIM_BASE={NIM_BASE}",
+        f"NIM_MODEL={model}",
+    ], dry_run)
+
+
+def _write_env_container(
+    api_key: str, model: str, vram_gb: int, dry_run: bool
+) -> None:
+    _write_env([
+        "# Generated by setup/setup.py — do not commit this file.",
+        "BACKEND=nim-container",
+        f"NGC_API_KEY={api_key}",
+        f"NVIDIA_API_KEY={api_key}",
+        f"NIM_MODEL={model}",
+        f"NIM_IMAGE={container_image(model)}",
+        f"GPU_VRAM_GB={vram_gb}",
+        "NIM_HOST=localhost",
+        "NIM_PORT=8000",
+    ], dry_run)
+
+
+def _write_env(lines: list[str], dry_run: bool) -> None:
+    content = "\n".join(lines) + "\n"
+    if dry_run:
+        console.print(f"\n  [dim][dry-run] Would write {ENV_PATH}:[/dim]")
+        console.print("  " + content.replace("\n", "\n  "))
         return
     ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
     ENV_PATH.write_text(content)
     os.chmod(ENV_PATH, 0o600)
-    print(f"  Wrote {ENV_PATH}")
-
-
-def launch(dry_run: bool) -> None:
-    banner("Launching server")
-    if dry_run:
-        print("  [dry-run] Would run: make deploy")
-        return
-    print("  Running: make deploy")
-    subprocess.run(["make", "deploy"], cwd=PROJECT_ROOT, check=False)
-
-
-# ─────────────────────────── main ───────────────────────────
-
-
-def main() -> int:
-    ap = argparse.ArgumentParser(description="Interactive setup wizard.")
-    ap.add_argument("--dry-run", action="store_true",
-                    help="Walk through the wizard without pulling models or "
-                         "starting containers.")
-    args = ap.parse_args()
-
-    print("\nGPU Inference Infrastructure — Setup Wizard")
-    if args.dry_run:
-        print("(DRY RUN — no side effects will be performed)")
-
-    check_prereqs(args.dry_run)
-    vram_gb, vram_source = detect_or_ask_vram()
-    model = pick_model(vram_gb)
-    vllm = configure_vllm()
-    write_env(model, vllm, args.dry_run)
-
-    banner("Setup summary")
-    print(f"  Model:       {model['model_name']}")
-    if model["local_path"]:
-        print(f"  Local path:  {model['local_path']} -> /model (ro)")
-    print(f"  VRAM budget: {vram_gb} GB ({vram_source})")
-    print(f"  vLLM:        mem={vllm['GPU_MEM_UTIL']}  "
-          f"seqs={vllm['MAX_NUM_SEQS']}  len={vllm['MAX_MODEL_LEN']}  "
-          f"dtype={vllm['DTYPE']}")
-
-    launch(args.dry_run)
-    return 0
+    console.print(f"\n  [green]Wrote {ENV_PATH}[/green]")
 
 
 if __name__ == "__main__":

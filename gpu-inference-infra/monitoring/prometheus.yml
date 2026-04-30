@@ -1,13 +1,23 @@
 global:
-  scrape_interval: 15s
+  scrape_interval:     15s
   evaluation_interval: 15s
 
 rule_files:
   - "alert-rules.yml"
 
 scrape_configs:
-  - job_name: "vllm"
+  # NIM container exposes Prometheus metrics at /v1/metrics (not /metrics).
+  # This is the vLLM metrics endpoint proxied through the NIM API layer.
+  - job_name: "nim"
     static_configs:
-      - targets: ["vllm:8000"]
-    metrics_path: "/metrics"
+      - targets: ["nim:8000"]
+    metrics_path: "/v1/metrics"
+    scrape_interval: 5s
+
+  # DCGM Exporter — GPU hardware metrics (VRAM, utilisation, temperature).
+  # Only active when running the NIM container path (has a real GPU).
+  # Remove this section if running nim-hosted only.
+  - job_name: "dcgm"
+    static_configs:
+      - targets: ["dcgm-exporter:9400"]
     scrape_interval: 5s

@@ -1,10 +1,26 @@
 version: '3.8'
 
+# GPU Inference Observatory — Docker Compose stack
+#
+# Services:
+#   nim           — NVIDIA NIM container  (model inference, /v1 API)
+#   prometheus    — Metrics collection    (scrapes nim:8000/v1/metrics)
+#   dcgm-exporter — GPU hardware metrics  (VRAM, utilisation, temperature)
+#
+# Usage:
+#   make setup   → writes deploy/.env  (BACKEND, NGC_API_KEY, NIM_IMAGE, …)
+#   make deploy  → docker-compose up -d
+#
+# Requires BACKEND=nim-container in deploy/.env.
+# For NIM hosted API (no GPU) this file is not used — the web server
+# calls integrate.api.nvidia.com directly.
+
 services:
-  vllm:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile
+
+  # ── NVIDIA NIM inference container ──────────────────────────────────────
+  nim:
+    image: ${NIM_IMAGE:-nvcr.io/nim/meta/llama-3.1-8b-instruct:latest}
+    container_name: nim
     ports:
       - "8000:8000"
     deploy:
@@ -14,27 +30,18 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    env_file:
-      - .env
     environment:
-      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
-    command: >
-      --model ${MODEL_NAME:-meta-llama/Meta-Llama-3-8B-Instruct}
-      --gpu-memory-utilization ${GPU_MEM_UTIL:-0.85}
-      --max-model-len ${MAX_MODEL_LEN:-4096}
-      --max-num-seqs ${MAX_NUM_SEQS:-8}
-      --dtype ${DTYPE:-float16}
-      --host 0.0.0.0
-      --port 8000
+      - NGC_API_KEY=${NGC_API_KEY}
+      - NIM_SERVER_PORT=8000
     volumes:
-      - model-cache:/root/.cache/huggingface
+      - nim-cache:/opt/nim/.cache
       - ../results:/opt/results
-      # Local model mount. When LOCAL_MODEL_PATH is set in .env, the setup
-      # wizard also writes MODEL_NAME=/model so vLLM loads from this mount
-      # instead of downloading from HuggingFace. When unset, it defaults to
-      # the deploy dir itself — harmless because vLLM never references /model
-      # in the HuggingFace flow.
-      - ${LOCAL_MODEL_PATH:-./}:/model:ro
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/v1/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s    # large models take 2–5 min to load into GPU VRAM
     restart: unless-stopped
     logging:
       driver: json-file
@@ -42,17 +49,47 @@ services:
         max-size: "50m"
         max-file: "3"
 
+  # ── Prometheus ────────────────────────────────────────────────────────────
+  # NIM exposes vLLM metrics at /v1/metrics (see monitoring/prometheus.yml).
   prometheus:
     image: prom/prometheus:latest
+    container_name: prometheus
     ports:
       - "9090:9090"
     volumes:
-      - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
-      - ../monitoring/alert-rules.yml:/etc/prometheus/alert-rules.yml
+      - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../monitoring/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
     depends_on:
-      - vllm
+      - nim
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+
+  # ── DCGM Exporter ─────────────────────────────────────────────────────────
+  # GPU hardware metrics: VRAM used/free, GPU utilisation %, temperature,
+  # power draw. Prometheus scrapes at dcgm-exporter:9400.
+  dcgm-exporter:
+    image: nvcr.io/nvidia/k8s/dcgm-exporter:latest
+    container_name: dcgm-exporter
+    ports:
+      - "9400:9400"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    cap_add:
+      - SYS_ADMIN
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
 
 volumes:
-  model-cache:
+  nim-cache:
     driver: local

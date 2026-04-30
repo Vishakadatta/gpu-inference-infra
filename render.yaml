@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: gpu-inference-observatory
+    runtime: python
+    rootDir: gpu-inference-infra
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api.server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: NVIDIA_API_KEY
+        sync: false          # set this in the Render dashboard — never commit it
+      - key: NIM_MODEL
+        value: meta/llama-3.1-8b-instruct
+      - key: BACKEND
+        value: nim-hosted
+      - key: NIM_BASE
+        value: https://integrate.api.nvidia.com/v1

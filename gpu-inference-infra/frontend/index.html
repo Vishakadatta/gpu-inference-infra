@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GPU Inference Observatory</title>
+  <style>
+    :root {
+      --bg:       #0d1117;
+      --surface:  #161b22;
+      --border:   #30363d;
+      --accent:   #76b900;   /* NVIDIA green */
+      --accent2:  #388bfd;
+      --text:     #e6edf3;
+      --muted:    #8b949e;
+      --success:  #3fb950;
+      --warn:     #d29922;
+      --error:    #f85149;
+      --card-bg:  #1c2128;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      font-size: 14px;
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .logo { display: flex; align-items: center; gap: 10px; }
+    .logo-icon {
+      width: 28px; height: 28px;
+      background: var(--accent);
+      border-radius: 6px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px;
+    }
+    .logo h1 { font-size: 16px; font-weight: 600; letter-spacing: -0.3px; }
+    .logo h1 span { color: var(--accent); }
+
+    .header-meta {
+      display: flex; align-items: center; gap: 16px;
+    }
+    .badge {
+      padding: 3px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+    }
+    .badge-nim { background: rgba(118,185,0,0.15); color: var(--accent); border: 1px solid rgba(118,185,0,0.3); }
+    .badge-model { background: rgba(56,139,253,0.12); color: var(--accent2); border: 1px solid rgba(56,139,253,0.25); font-size: 11px; }
+    #status-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--muted);
+      display: inline-block;
+    }
+    #status-dot.ok    { background: var(--success); box-shadow: 0 0 6px var(--success); }
+    #status-dot.error { background: var(--error);   box-shadow: 0 0 6px var(--error);   }
+
+    /* ── Layout ── */
+    .main { display: grid; grid-template-columns: 340px 1fr; gap: 0; height: calc(100vh - 57px); }
+
+    /* ── Left panel ── */
+    .panel-left {
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+    .section-title {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+    }
+
+    /* Preset buttons */
+    .presets { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+    .preset-btn {
+      padding: 5px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 500;
+      transition: all 0.15s;
+    }
+    .preset-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .preset-btn.active { background: rgba(118,185,0,0.12); border-color: var(--accent); color: var(--accent); }
+
+    textarea {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      padding: 10px;
+      font-size: 13px;
+      font-family: inherit;
+      resize: vertical;
+      min-height: 80px;
+      line-height: 1.5;
+      transition: border-color 0.15s;
+    }
+    textarea:focus { outline: none; border-color: var(--accent); }
+
+    .fire-btn {
+      width: 100%;
+      padding: 10px;
+      background: var(--accent);
+      border: none;
+      border-radius: 6px;
+      color: #000;
+      font-weight: 700;
+      font-size: 13px;
+      cursor: pointer;
+      margin-top: 10px;
+      letter-spacing: 0.3px;
+      transition: opacity 0.15s;
+    }
+    .fire-btn:hover { opacity: 0.85; }
+    .fire-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* Load test */
+    .lt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+    label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 4px; }
+    select, input[type="number"] {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      padding: 6px 8px;
+      font-size: 12px;
+    }
+    select:focus, input[type="number"]:focus { outline: none; border-color: var(--accent2); }
+
+    .lt-btn {
+      width: 100%;
+      padding: 8px;
+      background: var(--accent2);
+      border: none;
+      border-radius: 6px;
+      color: #fff;
+      font-weight: 600;
+      font-size: 12px;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .lt-btn:hover { opacity: 0.85; }
+    .lt-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* ── Right panel ── */
+    .panel-right {
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    /* Metric cards row */
+    .metrics-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+    .metric-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 16px;
+      transition: border-color 0.2s;
+    }
+    .metric-card.highlight { border-color: var(--accent); }
+    .metric-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+    .metric-value { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; }
+    .metric-unit  { font-size: 13px; color: var(--muted); margin-left: 3px; font-weight: 400; }
+    .metric-value.fast   { color: var(--success); }
+    .metric-value.medium { color: var(--warn); }
+    .metric-value.slow   { color: var(--error); }
+
+    /* Answer box */
+    .answer-box {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      min-height: 100px;
+    }
+    .answer-text {
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .answer-text.placeholder { color: var(--muted); font-style: italic; }
+
+    /* Typing cursor */
+    @keyframes blink { 50% { opacity: 0; } }
+    .cursor::after {
+      content: '▋';
+      animation: blink 1s step-start infinite;
+      color: var(--accent);
+    }
+
+    /* Load test results table */
+    .lt-results {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .lt-results table { width: 100%; border-collapse: collapse; }
+    .lt-results th {
+      background: var(--surface);
+      padding: 8px 14px;
+      text-align: left;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      border-bottom: 1px solid var(--border);
+    }
+    .lt-results td {
+      padding: 9px 14px;
+      font-size: 12px;
+      border-bottom: 1px solid rgba(48,54,61,0.5);
+      font-variant-numeric: tabular-nums;
+    }
+    .lt-results tr:last-child td { border-bottom: none; }
+    .lt-results td.ok  { color: var(--success); }
+    .lt-results td.bad { color: var(--error); }
+
+    /* Progress bar */
+    .progress-wrap { margin: 4px 0 0; }
+    .progress-bar {
+      height: 4px;
+      background: var(--border);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      background: var(--accent2);
+      border-radius: 2px;
+      transition: width 0.3s;
+      width: 0%;
+    }
+    .progress-label { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+    /* What is this */
+    .explainer {
+      background: rgba(56,139,253,0.06);
+      border: 1px solid rgba(56,139,253,0.2);
+      border-radius: 8px;
+      padding: 14px 16px;
+    }
+    .explainer h3 { font-size: 12px; color: var(--accent2); margin-bottom: 8px; font-weight: 600; }
+    .explainer p  { font-size: 12px; color: var(--muted); line-height: 1.6; margin-bottom: 6px; }
+    .explainer p:last-child { margin-bottom: 0; }
+    .explainer strong { color: var(--text); }
+
+    /* Spinner */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      display: inline-block;
+      width: 14px; height: 14px;
+      border: 2px solid rgba(255,255,255,0.2);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      vertical-align: middle;
+      margin-right: 6px;
+    }
+
+    /* Error toast */
+    #toast {
+      position: fixed;
+      bottom: 20px; right: 20px;
+      background: var(--error);
+      color: #fff;
+      padding: 10px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 500;
+      display: none;
+      max-width: 380px;
+      z-index: 100;
+    }
+
+    @media (max-width: 900px) {
+      .main { grid-template-columns: 1fr; height: auto; }
+      .panel-left { border-right: none; border-bottom: 1px solid var(--border); }
+      .metrics-row { grid-template-columns: repeat(2, 1fr); }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header>
+  <div class="logo">
+    <div class="logo-icon">⚡</div>
+    <h1>GPU Inference <span>Observatory</span></h1>
+  </div>
+  <div class="header-meta">
+    <span id="status-dot"></span>
+    <span id="model-badge" class="badge badge-model">loading…</span>
+    <span class="badge badge-nim">NVIDIA NIM</span>
+    <a href="https://github.com/Vishakadatta/gpu-inference-infra"
+       target="_blank"
+       style="color:var(--muted);text-decoration:none;font-size:12px;">
+      GitHub ↗
+    </a>
+  </div>
+</header>
+
+<div class="main">
+
+  <!-- ── Left panel ── -->
+  <div class="panel-left">
+
+    <!-- Single inference -->
+    <div>
+      <div class="section-title">Fire a Request</div>
+      <div class="card">
+        <div class="presets">
+          <button class="preset-btn active" data-preset="short">Short</button>
+          <button class="preset-btn" data-preset="medium">Medium</button>
+          <button class="preset-btn" data-preset="long">Long</button>
+          <button class="preset-btn" data-preset="custom">Custom</button>
+        </div>
+        <textarea id="prompt-input" rows="4">What is a GPU?</textarea>
+        <button class="fire-btn" id="fire-btn">▶ Fire Request</button>
+      </div>
+    </div>
+
+    <!-- Load test -->
+    <div>
+      <div class="section-title">Load Test</div>
+      <div class="card">
+        <div class="lt-grid">
+          <div>
+            <label>Prompt preset</label>
+            <select id="lt-preset">
+              <option value="short">Short</option>
+              <option value="medium">Medium</option>
+              <option value="long">Long</option>
+            </select>
+          </div>
+          <div>
+            <label>Concurrency</label>
+            <select id="lt-concurrency">
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="4" selected>4</option>
+              <option value="8">8</option>
+              <option value="16">16</option>
+            </select>
+          </div>
+          <div>
+            <label>Num requests</label>
+            <input type="number" id="lt-requests" value="20" min="1" max="50">
+          </div>
+          <div>
+            <label>Max tokens</label>
+            <input type="number" id="lt-tokens" value="100" min="10" max="512">
+          </div>
+        </div>
+        <div class="progress-wrap" id="lt-progress-wrap" style="display:none">
+          <div class="progress-bar"><div class="progress-fill" id="lt-progress-fill"></div></div>
+          <div class="progress-label" id="lt-progress-label">Running…</div>
+        </div>
+        <button class="lt-btn" id="lt-btn" style="margin-top:10px">⚡ Run Load Test</button>
+      </div>
+    </div>
+
+    <!-- Explainer -->
+    <div class="explainer">
+      <h3>What am I looking at?</h3>
+      <p>
+        This tool shows <strong>what the GPU infrastructure does</strong> when an LLM request
+        comes in — not just "the AI answered."
+      </p>
+      <p>
+        <strong>Time to First Token (TTFT)</strong> — how long before the first word arrived.
+        Changes dramatically with prompt length.
+      </p>
+      <p>
+        <strong>Load test</strong> — fire multiple requests concurrently.
+        Watch p95/p99 latency climb as the request queue fills.
+        That's the GPU scheduler under pressure.
+      </p>
+      <p>
+        Backed by <strong>NVIDIA NIM</strong> on DGX Cloud.
+        For full GPU metrics (VRAM, KV cache, temperature) see the
+        <a href="https://github.com/Vishakadatta/gpu-inference-infra"
+           target="_blank" style="color:var(--accent2)">self-hosted container path</a>.
+      </p>
+    </div>
+
+  </div>
+
+  <!-- ── Right panel ── -->
+  <div class="panel-right">
+
+    <!-- Metric cards -->
+    <div>
+      <div class="section-title">Last Request — Infrastructure Metrics</div>
+      <div class="metrics-row">
+        <div class="metric-card" id="card-ttft">
+          <div class="metric-label">Time to First Token</div>
+          <div class="metric-value" id="val-ttft">—<span class="metric-unit">ms</span></div>
+        </div>
+        <div class="metric-card" id="card-latency">
+          <div class="metric-label">Total Latency</div>
+          <div class="metric-value" id="val-latency">—<span class="metric-unit">ms</span></div>
+        </div>
+        <div class="metric-card" id="card-tps">
+          <div class="metric-label">Throughput</div>
+          <div class="metric-value" id="val-tps">—<span class="metric-unit">tok/s</span></div>
+        </div>
+        <div class="metric-card" id="card-tokens">
+          <div class="metric-label">Tokens Generated</div>
+          <div class="metric-value" id="val-tokens">—</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Answer -->
+    <div class="card answer-box">
+      <div class="section-title" style="margin-bottom:10px">Response</div>
+      <div class="answer-text placeholder" id="answer-text">
+        Fire a request to see the response here.
+        The metrics above update in real time as tokens arrive.
+      </div>
+    </div>
+
+    <!-- Load test results -->
+    <div id="lt-results-section" style="display:none">
+      <div class="section-title">Load Test Results</div>
+      <div class="lt-results">
+        <table>
+          <thead>
+            <tr>
+              <th>Concurrency</th>
+              <th>Requests</th>
+              <th>Avg Latency</th>
+              <th>p50</th>
+              <th>p95</th>
+              <th>p99</th>
+              <th>Avg tok/s</th>
+              <th>Errors</th>
+            </tr>
+          </thead>
+          <tbody id="lt-table-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// ── Config ─────────────────────────────────────────────────────────────────
+const PROMPTS = {
+  short:  "What is a GPU?",
+  medium: "Explain in detail how a graphics processing unit works, including its architecture, how it differs from a CPU, and why it is useful for machine learning workloads.",
+  long:   "Write a comprehensive technical overview of GPU computing. Cover: the history of GPU development, CUDA programming model, GPU memory hierarchy (global, shared, registers, L1/L2 cache), thread execution model (warps, blocks, grids), common optimisation techniques, comparison with CPUs for parallel workloads, and the role of GPUs in modern AI inference and training."
+};
+
+// ── DOM refs ───────────────────────────────────────────────────────────────
+const fireBtn      = document.getElementById('fire-btn');
+const ltBtn        = document.getElementById('lt-btn');
+const promptInput  = document.getElementById('prompt-input');
+const answerText   = document.getElementById('answer-text');
+const statusDot    = document.getElementById('status-dot');
+const modelBadge   = document.getElementById('model-badge');
+const toast        = document.getElementById('toast');
+
+// ── Preset buttons ──────────────────────────────────────────────────────────
+let currentPreset = 'short';
+document.querySelectorAll('.preset-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentPreset = btn.dataset.preset;
+    if (currentPreset !== 'custom') {
+      promptInput.value = PROMPTS[currentPreset];
+    } else {
+      promptInput.value = '';
+      promptInput.focus();
+    }
+  });
+});
+
+// ── Metric helpers ─────────────────────────────────────────────────────────
+function setMetric(id, value, unit) {
+  const el = document.getElementById('val-' + id);
+  el.innerHTML = value + (unit ? `<span class="metric-unit">${unit}</span>` : '');
+}
+
+function colorMetric(id, value, thresholds) {
+  const card = document.getElementById('card-' + id);
+  const val  = document.getElementById('val-' + id);
+  card.classList.add('highlight');
+  val.className = 'metric-value';
+  if (value <= thresholds[0])      val.classList.add('fast');
+  else if (value <= thresholds[1]) val.classList.add('medium');
+  else                             val.classList.add('slow');
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────
+function showToast(msg) {
+  toast.textContent = msg;
+  toast.style.display = 'block';
+  setTimeout(() => { toast.style.display = 'none'; }, 4000);
+}
+
+// ── Health check on load ─────────────────────────────────────────────────
+async function checkHealth() {
+  try {
+    const r  = await fetch('/api/health');
+    const d  = await r.json();
+    statusDot.className = d.status === 'ok' ? 'ok' : 'error';
+    modelBadge.textContent = d.model || 'unknown';
+  } catch {
+    statusDot.className = 'error';
+  }
+}
+checkHealth();
+
+// ── Single inference ─────────────────────────────────────────────────────
+fireBtn.addEventListener('click', async () => {
+  const prompt = promptInput.value.trim();
+  if (!prompt) return;
+
+  fireBtn.disabled = true;
+  fireBtn.innerHTML = '<span class="spinner"></span>Waiting for first token…';
+  answerText.className = 'answer-text placeholder cursor';
+  answerText.textContent = '';
+  setMetric('ttft', '—', 'ms');
+  setMetric('latency', '—', 'ms');
+  setMetric('tps', '—', 'tok/s');
+  setMetric('tokens', '—', '');
+
+  try {
+    const t0 = performance.now();
+
+    const r = await fetch('/api/infer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, max_tokens: 256 }),
+    });
+
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({ detail: r.statusText }));
+      throw new Error(err.detail || r.statusText);
+    }
+
+    const d = await r.json();
+
+    // Render answer
+    answerText.className = 'answer-text';
+    answerText.textContent = d.answer || '(empty response)';
+
+    // Update metrics
+    setMetric('ttft',    d.ttft_ms,          'ms');
+    setMetric('latency', d.total_latency_ms, 'ms');
+    setMetric('tps',     d.tokens_per_second, 'tok/s');
+    setMetric('tokens',  d.tokens_generated, '');
+
+    colorMetric('ttft',    d.ttft_ms,          [300, 800]);
+    colorMetric('latency', d.total_latency_ms, [1000, 3000]);
+    colorMetric('tps',     d.tokens_per_second, [50, 20]);  // inverted: higher = faster
+    colorMetric('tokens',  d.tokens_generated,  [50, 20]);
+
+    fireBtn.innerHTML = '▶ Fire Request';
+  } catch (err) {
+    answerText.className = 'answer-text';
+    answerText.textContent = '';
+    showToast('Error: ' + err.message);
+    fireBtn.innerHTML = '▶ Fire Request';
+  }
+
+  fireBtn.disabled = false;
+});
+
+// ── Load test ─────────────────────────────────────────────────────────────
+ltBtn.addEventListener('click', async () => {
+  const preset      = document.getElementById('lt-preset').value;
+  const concurrency = parseInt(document.getElementById('lt-concurrency').value);
+  const numRequests = parseInt(document.getElementById('lt-requests').value);
+  const maxTokens   = parseInt(document.getElementById('lt-tokens').value);
+
+  ltBtn.disabled   = true;
+  ltBtn.textContent = 'Running…';
+
+  const progressWrap  = document.getElementById('lt-progress-wrap');
+  const progressFill  = document.getElementById('lt-progress-fill');
+  const progressLabel = document.getElementById('lt-progress-label');
+  progressWrap.style.display = 'block';
+  progressFill.style.width   = '0%';
+  progressLabel.textContent  = `Firing ${numRequests} requests at concurrency ${concurrency}…`;
+
+  // Fake progress animation while waiting
+  let pct = 0;
+  const tick = setInterval(() => {
+    pct = Math.min(pct + 2, 90);
+    progressFill.style.width = pct + '%';
+  }, 300);
+
+  try {
+    const r = await fetch('/api/loadtest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt_preset: preset, concurrency, num_requests: numRequests, max_tokens: maxTokens }),
+    });
+
+    clearInterval(tick);
+    progressFill.style.width = '100%';
+
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({ detail: r.statusText }));
+      throw new Error(err.detail || r.statusText);
+    }
+
+    const d = await r.json();
+    const s = d.summary;
+
+    progressLabel.textContent = `Done — ${s.successful}/${s.total_requests} succeeded in ${s.duration_s}s`;
+
+    // Append row to table
+    const tbody  = document.getElementById('lt-table-body');
+    const errPct = s.error_rate_pct;
+    const row    = document.createElement('tr');
+    row.innerHTML = `
+      <td>${s.concurrency}</td>
+      <td>${s.total_requests}</td>
+      <td>${s.avg_latency_ms} ms</td>
+      <td>${s.p50_ms} ms</td>
+      <td>${s.p95_ms} ms</td>
+      <td>${s.p99_ms} ms</td>
+      <td>${s.avg_tps} tok/s</td>
+      <td class="${errPct > 0 ? 'bad' : 'ok'}">${errPct}%</td>
+    `;
+    tbody.appendChild(row);
+
+    document.getElementById('lt-results-section').style.display = 'block';
+
+  } catch (err) {
+    clearInterval(tick);
+    progressFill.style.width = '0%';
+    progressLabel.textContent = 'Failed.';
+    showToast('Load test error: ' + err.message);
+  }
+
+  ltBtn.disabled    = false;
+  ltBtn.textContent = '⚡ Run Load Test';
+});
+</script>
+</body>
+</html>

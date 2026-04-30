@@ -1,17 +1,40 @@
 groups:
-  - name: vllm_inference_alerts
+  - name: nim_inference_alerts
     rules:
-      # Request latency is too high
+
+      # ── Latency ────────────────────────────────────────────────────────────
+
       - alert: HighInferenceLatency
-        expr: histogram_quantile(0.99, rate(vllm:request_latency_seconds_bucket[5m])) > 10
+        expr: >
+          histogram_quantile(0.99,
+            rate(vllm:e2e_request_latency_seconds_bucket[5m])
+          ) > 10
         for: 2m
         labels:
           severity: warning
         annotations:
           summary: "Inference p99 latency above 10s"
-          description: "p99 latency has been above 10 seconds for 2 minutes. Server may be overloaded."
+          description: >
+            p99 end-to-end latency has exceeded 10 seconds for 2 minutes.
+            The server may be overloaded or KV cache is saturated.
 
-      # Request queue is backing up
+      - alert: HighTimeToFirstToken
+        expr: >
+          histogram_quantile(0.95,
+            rate(vllm:time_to_first_token_seconds_bucket[5m])
+          ) > 3
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TTFT p95 above 3s"
+          description: >
+            95th-percentile time-to-first-token exceeds 3 seconds.
+            Prefill is likely becoming the bottleneck — consider reducing
+            MAX_MODEL_LEN or increasing GPU memory utilisation.
+
+      # ── Queue / throughput ─────────────────────────────────────────────────
+
       - alert: RequestQueueBacklog
         expr: vllm:num_requests_waiting > 20
         for: 1m
@@ -19,14 +42,56 @@ groups:
           severity: warning
         annotations:
           summary: "Request queue backlog > 20"
-          description: "More than 20 requests waiting. Consider scaling or reducing max_num_seqs."
+          description: >
+            More than 20 requests waiting in the vLLM scheduler queue.
+            Consider scaling horizontally or reducing max_num_seqs.
 
-      # vLLM target is down
-      - alert: VLLMDown
-        expr: up{job="vllm"} == 0
+      - alert: KVCacheSaturation
+        expr: vllm:kv_cache_usage_perc > 0.90
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "KV cache above 90%"
+          description: >
+            KV cache utilisation has been above 90% for 2 minutes.
+            Requests will start being preempted. Reduce MAX_MODEL_LEN
+            or MAX_NUM_SEQS, or upgrade to a GPU with more VRAM.
+
+      # ── Server health ──────────────────────────────────────────────────────
+
+      - alert: NIMDown
+        expr: up{job="nim"} == 0
         for: 1m
         labels:
           severity: critical
         annotations:
-          summary: "vLLM server is unreachable"
-          description: "Prometheus cannot scrape vLLM metrics. Server may have crashed."
+          summary: "NIM container is unreachable"
+          description: >
+            Prometheus cannot scrape NIM metrics. Container may have crashed
+            (OOM kill is the most common cause). Check: docker logs nim.
+
+      # ── GPU hardware (only fires when DCGM Exporter is running) ───────────
+
+      - alert: GPUHighTemperature
+        expr: DCGM_FI_DEV_GPU_TEMP > 85
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GPU temperature above 85°C"
+          description: >
+            GPU {{ $labels.gpu }} is at {{ $value }}°C.
+            Thermal throttling is likely. Check airflow and cooling.
+
+      - alert: GPUMemoryPressure
+        expr: >
+          (DCGM_FI_DEV_FB_USED / DCGM_FI_DEV_FB_FREE) > 0.95
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GPU VRAM above 95%"
+          description: >
+            GPU {{ $labels.gpu }} VRAM utilisation is above 95%.
+            OOM kill is imminent if a large batch is scheduled.
