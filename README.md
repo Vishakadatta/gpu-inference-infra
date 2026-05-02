@@ -2,7 +2,7 @@
 
 Deployment, monitoring, and operational tooling for GPU-based LLM inference — powered by NVIDIA NIM.
 
-**[Live Demo →](https://gpu-inference-observatory.onrender.com)**
+**[Live Demo →](https://vishakadatta.github.io/gpu-inference-infra/)**
 
 ---
 
@@ -116,20 +116,24 @@ make monitor        # start GPU metrics daemon
 └──────────────────────────────────────────────────────────────┘
 ```
 
-### Observatory web UI (hosted path)
+### Hosting architecture (same pattern as ModelCouncil)
 
 ```
-Browser
-  │
-  ├── GET  /api/health    → NIM /v1/models ping → latency_ms
-  ├── GET  /api/models    → NIM /v1/models → filtered list (blocked publishers removed)
-  ├── POST /api/infer     → NIM streaming SSE → TTFT + full response
-  └── POST /api/loadtest  → N concurrent NIM calls → p50/p95/p99 latency table
+GitHub Pages                          Render (FastAPI)
+──────────────────────                ─────────────────────────────────
+frontend/index.html   ──fetch──▶      /api/health   → NIM ping
+(static, free)                        /api/models   → filtered model list
+                                      /api/infer    → NIM streaming SSE → TTFT
+                                      /api/loadtest → concurrent requests → p50/p95/p99
 ```
 
-Rate limiting: 10 requests per minute per IP on `/api/infer` and `/api/loadtest`.
+On every push to `main`, GitHub Actions:
+1. Injects the Render backend URL into `index.html` (replaces `localhost:8080` fallback)
+2. Deploys `frontend/` to GitHub Pages
+3. Hits `/api/health` to verify the backend is up
 
-Publisher filter: Chinese-origin publishers (deepseek, qwen, minimax, 01-ai, zhipu, baichuan, …) are stripped server-side before the model list reaches the UI.
+Rate limiting: 10 req/min per IP on `/api/infer` and `/api/loadtest`.
+Publisher filter: Chinese-origin publishers stripped server-side before the model list reaches the UI.
 
 ### Key metrics exposed by NIM
 

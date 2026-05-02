@@ -502,6 +502,10 @@
 <div id="toast"></div>
 
 <script>
+// ── API base URL — replaced by CI for production builds ────────────────────
+window.OBSERVATORY_API_URL = window.OBSERVATORY_API_URL || "http://localhost:8080";
+const API = window.OBSERVATORY_API_URL;
+
 // ── Config ─────────────────────────────────────────────────────────────────
 const PROMPTS = {
   short:  "What is a GPU?",
@@ -526,7 +530,7 @@ function selectedModel() {
 
 async function loadModels() {
   try {
-    const r = await fetch('/api/models');
+    const r = await fetch(`${API}/api/models`);
     if (!r.ok) throw new Error('failed');
     const d = await r.json();
     modelSelect.innerHTML = '';
@@ -600,7 +604,7 @@ function showToast(msg) {
 // ── Health check on load ─────────────────────────────────────────────────
 async function checkHealth() {
   try {
-    const r  = await fetch('/api/health');
+    const r  = await fetch(`${API}/api/health`);
     const d  = await r.json();
     statusDot.className = d.status === 'ok' ? 'ok' : 'error';
     // Badge is driven by the model selector — only fall back to health default
@@ -631,7 +635,7 @@ fireBtn.addEventListener('click', async () => {
   try {
     const t0 = performance.now();
 
-    const r = await fetch('/api/infer', {
+    const r = await fetch(`${API}/api/infer`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt, max_tokens: 256, model: selectedModel() }),
@@ -695,7 +699,7 @@ ltBtn.addEventListener('click', async () => {
   }, 300);
 
   try {
-    const r = await fetch('/api/loadtest', {
+    const r = await fetch(`${API}/api/loadtest`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt_preset: preset, concurrency, num_requests: numRequests, max_tokens: maxTokens, model: selectedModel() }),
