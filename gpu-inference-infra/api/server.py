@@ -2,9 +2,9 @@
 
 Endpoints:
   GET  /api/health       — NIM connectivity check
-  GET  /api/models       — list available NIM models
-  POST /api/infer        — single inference with TTFT measurement
-  POST /api/loadtest     — concurrent load test, returns aggregated metrics
+  GET  /api/models       — list available NIM models (filtered, no Chinese-origin publishers)
+  POST /api/infer        — single inference with TTFT measurement  (10 req/min per IP)
+  POST /api/loadtest     — concurrent load test, returns aggregated metrics  (10 req/min per IP)
   GET  /                 — serves frontend/index.html
 
 Environment variables (set in deploy/.env or Render dashboard):
@@ -28,11 +28,14 @@ from typing import Optional
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 # ── Load .env if present (local dev) ─────────────────────────────────────────
 load_dotenv(Path(__file__).parent.parent / "deploy" / ".env")
@@ -51,9 +54,30 @@ if _BACKEND == "nim-container":
 
 _AUTH_HEADER = f"Bearer {_API_KEY}" if _API_KEY else None
 
-# ── Rate limiter (simple per-IP token bucket) ─────────────────────────────────
-_last_request: dict[str, float] = {}
-_RATE_LIMIT_SECONDS = 3.0   # min seconds between requests per IP
+# ── Publisher blocklist (Chinese-origin models) ───────────────────────────────
+# Publisher is the prefix before the first "/" in a NIM model ID.
+_BLOCKED_PUBLISHERS: frozenset[str] = frozenset({
+    "deepseek-ai", "deepseek",
+    "qwen", "alibaba",
+    "01-ai",
+    "thudm", "zhipu-ai", "zhipuai", "glm",
+    "minimax-ai", "minimaxai",
+    "moonshot-ai", "moonshotai",
+    "baichuan-inc", "baichuan",
+    "z-ai",
+    "internlm",
+    "openbmb",
+    "tiiuae",          # falcon (UAE, excluded per policy)
+})
+
+
+def _publisher_allowed(model_id: str) -> bool:
+    """Return True if the model's publisher is not on the blocklist."""
+    if "/" not in model_id:
+        return True   # bare model names have no publisher prefix — keep them
+    publisher = model_id.split("/")[0].lower()
+    return publisher not in _BLOCKED_PUBLISHERS
+
 
 # ── Prompt presets ────────────────────────────────────────────────────────────
 PROMPTS = {
@@ -73,8 +97,13 @@ PROMPTS = {
     ),
 }
 
+# ── Rate limiter ──────────────────────────────────────────────────────────────
+limiter = Limiter(key_func=get_remote_address)
+
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(title="GPU Inference Observatory", version="1.0.0")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -311,7 +340,7 @@ async def health():
 
 @app.get("/api/models")
 async def list_models():
-    """Return the list of models available on the current NIM backend."""
+    """Return allowed NIM models (Chinese-origin publishers filtered out)."""
     headers = {}
     if _AUTH_HEADER:
         headers["Authorization"] = _AUTH_HEADER
@@ -320,16 +349,27 @@ async def list_models():
             r = await client.get(f"{_NIM_BASE}/models", headers=headers)
         r.raise_for_status()
         data   = r.json()
-        models = [m["id"] for m in data.get("data", [])]
+        models = [
+            m["id"]
+            for m in data.get("data", [])
+            if _publisher_allowed(m.get("id", ""))
+        ]
+        # Put the configured default first if it is in the allowed list
+        if _NIM_MODEL in models:
+            models.remove(_NIM_MODEL)
+            models.insert(0, _NIM_MODEL)
         return {"models": models, "default": _NIM_MODEL}
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
 
 @app.post("/api/infer")
-async def infer(req: InferRequest):
+@limiter.limit("10/minute")
+async def infer(request: Request, req: InferRequest):
     """
     Run a single inference request and return the answer + infrastructure metrics.
+
+    Rate-limited to 10 requests per minute per IP.
 
     Metrics returned:
       ttft_ms          — time to first token  (how long before words started arriving)
@@ -349,9 +389,12 @@ async def infer(req: InferRequest):
 
 
 @app.post("/api/loadtest")
-async def loadtest(req: LoadTestRequest):
+@limiter.limit("10/minute")
+async def loadtest(request: Request, req: LoadTestRequest):
     """
     Fire N concurrent requests and return latency statistics.
+
+    Rate-limited to 10 requests per minute per IP.
 
     This is the infrastructure story: watch how TTFT and throughput degrade
     as concurrency increases.

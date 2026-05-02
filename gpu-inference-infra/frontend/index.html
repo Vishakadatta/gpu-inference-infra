@@ -347,6 +347,17 @@
   <!-- ── Left panel ── -->
   <div class="panel-left">
 
+    <!-- Model selector -->
+    <div>
+      <div class="section-title">Model</div>
+      <div class="card" style="padding:12px 16px">
+        <label style="margin-bottom:6px">NIM model</label>
+        <select id="model-select">
+          <option value="">Loading models…</option>
+        </select>
+      </div>
+    </div>
+
     <!-- Single inference -->
     <div>
       <div class="section-title">Fire a Request</div>
@@ -505,7 +516,47 @@ const promptInput  = document.getElementById('prompt-input');
 const answerText   = document.getElementById('answer-text');
 const statusDot    = document.getElementById('status-dot');
 const modelBadge   = document.getElementById('model-badge');
+const modelSelect  = document.getElementById('model-select');
 const toast        = document.getElementById('toast');
+
+// ── Model selector — fetch on load ─────────────────────────────────────────
+function selectedModel() {
+  return modelSelect.value || null;
+}
+
+async function loadModels() {
+  try {
+    const r = await fetch('/api/models');
+    if (!r.ok) throw new Error('failed');
+    const d = await r.json();
+    modelSelect.innerHTML = '';
+    d.models.forEach(id => {
+      const opt = document.createElement('option');
+      opt.value = id;
+      // Show a friendly label: strip org prefix for display
+      const label = id.includes('/') ? id.split('/').slice(1).join('/') : id;
+      opt.textContent = label;
+      modelSelect.appendChild(opt);
+    });
+    if (d.default && modelSelect.querySelector(`option[value="${d.default}"]`)) {
+      modelSelect.value = d.default;
+    }
+    updateModelBadge();
+  } catch {
+    modelSelect.innerHTML = '<option value="">Could not load models</option>';
+  }
+}
+
+function updateModelBadge() {
+  const val = modelSelect.value;
+  if (val) {
+    const label = val.includes('/') ? val.split('/').slice(1).join('/') : val;
+    modelBadge.textContent = label;
+  }
+}
+
+modelSelect.addEventListener('change', updateModelBadge);
+loadModels();
 
 // ── Preset buttons ──────────────────────────────────────────────────────────
 let currentPreset = 'short';
@@ -552,7 +603,11 @@ async function checkHealth() {
     const r  = await fetch('/api/health');
     const d  = await r.json();
     statusDot.className = d.status === 'ok' ? 'ok' : 'error';
-    modelBadge.textContent = d.model || 'unknown';
+    // Badge is driven by the model selector — only fall back to health default
+    // if the selector hasn't populated yet.
+    if (!modelSelect.value && d.model) {
+      modelBadge.textContent = d.model;
+    }
   } catch {
     statusDot.className = 'error';
   }
@@ -579,7 +634,7 @@ fireBtn.addEventListener('click', async () => {
     const r = await fetch('/api/infer', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, max_tokens: 256 }),
+      body: JSON.stringify({ prompt, max_tokens: 256, model: selectedModel() }),
     });
 
     if (!r.ok) {
@@ -643,7 +698,7 @@ ltBtn.addEventListener('click', async () => {
     const r = await fetch('/api/loadtest', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt_preset: preset, concurrency, num_requests: numRequests, max_tokens: maxTokens }),
+      body: JSON.stringify({ prompt_preset: preset, concurrency, num_requests: numRequests, max_tokens: maxTokens, model: selectedModel() }),
     });
 
     clearInterval(tick);
