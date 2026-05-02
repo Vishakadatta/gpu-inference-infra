@@ -20,6 +20,8 @@ The project demonstrates everything that surrounds an LLM inference service in p
 | **Metrics** | Prometheus scraping `vllm:time_to_first_token_seconds`, `vllm:kv_cache_usage_perc`, GPU hardware metrics via DCGM Exporter |
 | **Alerting** | Alert rules for latency spikes, KV cache saturation, OOM risk, GPU thermal events |
 | **Runbooks** | Documented procedures for OOM crashes, thermal throttling, degraded latency |
+| **Model selection** | Live model list from NIM `/v1/models`, filtered server-side by publisher policy |
+| **Rate limiting** | 10 req/min per IP via slowapi — keeps the free-tier API credits alive |
 
 ---
 
@@ -114,6 +116,21 @@ make monitor        # start GPU metrics daemon
 └──────────────────────────────────────────────────────────────┘
 ```
 
+### Observatory web UI (hosted path)
+
+```
+Browser
+  │
+  ├── GET  /api/health    → NIM /v1/models ping → latency_ms
+  ├── GET  /api/models    → NIM /v1/models → filtered list (blocked publishers removed)
+  ├── POST /api/infer     → NIM streaming SSE → TTFT + full response
+  └── POST /api/loadtest  → N concurrent NIM calls → p50/p95/p99 latency table
+```
+
+Rate limiting: 10 requests per minute per IP on `/api/infer` and `/api/loadtest`.
+
+Publisher filter: Chinese-origin publishers (deepseek, qwen, minimax, 01-ai, zhipu, baichuan, …) are stripped server-side before the model list reaches the UI.
+
 ### Key metrics exposed by NIM
 
 | Metric | What it shows |
@@ -134,9 +151,9 @@ make monitor        # start GPU metrics daemon
 ```
 gpu-inference-infra/
 ├── api/
-│   └── server.py               # FastAPI backend (TTFT measurement, load test API)
+│   └── server.py               # FastAPI backend (TTFT, /api/models, /api/loadtest, rate limiting)
 ├── frontend/
-│   └── index.html              # Observatory dashboard UI
+│   └── index.html              # Observatory dashboard — model selector, metrics, load test table
 ├── setup/
 │   ├── setup.py                # Interactive wizard (NIM hosted vs container)
 │   ├── nim_discover.py         # Live model discovery from NIM /v1/models
@@ -177,6 +194,8 @@ gpu-inference-infra/
 | Docker Compose over Kubernetes | Single-node deployment — Kubernetes adds orchestration complexity not warranted for one GPU |
 | Prometheus alert rules | `kv_cache_usage_perc > 0.9` and `num_requests_waiting > 20` are the real operational triggers — not generic HTTP alerts |
 | FastAPI for the web backend | Async, minimal, same process handles streaming NIM calls + static file serving |
+| slowapi rate limiting | Protects free-tier API credits; 10 req/min per IP is enough for interactive demos |
+| Server-side publisher filter | Policy enforced in one place (server) — UI never sees blocked models, no client-side bypass possible |
 
 ---
 
