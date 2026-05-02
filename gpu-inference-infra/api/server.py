@@ -42,17 +42,24 @@ load_dotenv(Path(__file__).parent.parent / "deploy" / ".env")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 _BACKEND   = os.environ.get("BACKEND", "nim-hosted")
-_API_KEY   = os.environ.get("NVIDIA_API_KEY") or os.environ.get("NGC_API_KEY", "")
-_NIM_BASE  = os.environ.get("NIM_BASE", "https://integrate.api.nvidia.com/v1").rstrip("/")
 _NIM_MODEL = os.environ.get("NIM_MODEL", "meta/llama-3.1-8b-instruct")
 
-# If nim-container, point at local container instead of hosted API
-if _BACKEND == "nim-container":
-    _host = os.environ.get("NIM_HOST", "localhost")
-    _port = os.environ.get("NIM_PORT", "8000")
-    _NIM_BASE = f"http://{_host}:{_port}/v1"
 
-_AUTH_HEADER = f"Bearer {_API_KEY}" if _API_KEY else None
+def _nim_base() -> str:
+    """Read NIM base URL fresh — same pattern as ModelCouncil."""
+    if os.environ.get("BACKEND", "nim-hosted") == "nim-container":
+        host = os.environ.get("NIM_HOST", "localhost")
+        port = os.environ.get("NIM_PORT", "8000")
+        return f"http://{host}:{port}/v1"
+    return os.environ.get("NIM_BASE", "https://integrate.api.nvidia.com/v1").rstrip("/")
+
+
+def _auth_header() -> str | None:
+    """Read NVIDIA_API_KEY fresh on every call — same pattern as ModelCouncil.
+    This ensures the key is always current whether loaded from env (Render)
+    or from a .env file loaded after import (local dev)."""
+    key = os.environ.get("NVIDIA_API_KEY") or os.environ.get("NGC_API_KEY", "")
+    return f"Bearer {key}" if key else None
 
 # ── Publisher blocklist (Chinese-origin models) ───────────────────────────────
 # Publisher is the prefix before the first "/" in a NIM model ID.
@@ -153,9 +160,10 @@ async def _call_nim_streaming(
         prompt_tokens   — from usage field on final chunk (if available)
         model_used      — actual model ID returned by NIM
     """
+    auth = _auth_header()
     headers = {"Content-Type": "application/json"}
-    if _AUTH_HEADER:
-        headers["Authorization"] = _AUTH_HEADER
+    if auth:
+        headers["Authorization"] = auth
 
     payload = {
         "model": model,
@@ -175,7 +183,7 @@ async def _call_nim_streaming(
     async with httpx.AsyncClient(timeout=120.0) as client:
         async with client.stream(
             "POST",
-            f"{_NIM_BASE}/chat/completions",
+            f"{_nim_base()}/chat/completions",
             json=payload,
             headers=headers,
         ) as resp:
@@ -242,9 +250,10 @@ async def _call_nim_single(
     semaphore: asyncio.Semaphore,
     req_id: int,
 ) -> dict:
+    auth = _auth_header()
     headers = {"Content-Type": "application/json"}
-    if _AUTH_HEADER:
-        headers["Authorization"] = _AUTH_HEADER
+    if auth:
+        headers["Authorization"] = auth
 
     payload = {
         "model": model,
@@ -259,7 +268,7 @@ async def _call_nim_single(
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
                 resp = await client.post(
-                    f"{_NIM_BASE}/chat/completions",
+                    f"{_nim_base()}/chat/completions",
                     json=payload,
                     headers=headers,
                 )
@@ -308,27 +317,25 @@ async def serve_frontend():
 @app.get("/api/health")
 async def health():
     """Check NIM connectivity and measure round-trip latency."""
-    headers = {}
-    if _AUTH_HEADER:
-        headers["Authorization"] = _AUTH_HEADER
+    auth = _auth_header()
+    headers = {"Authorization": auth} if auth else {}
+    base = _nim_base()
 
     start = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            if _BACKEND == "nim-hosted":
-                r = await client.get(f"{_NIM_BASE}/models", headers=headers)
+            if os.environ.get("BACKEND", "nim-hosted") == "nim-hosted":
+                r = await client.get(f"{base}/models", headers=headers)
             else:
-                r = await client.get(
-                    f"{_NIM_BASE}/health/ready", headers=headers
-                )
+                r = await client.get(f"{base}/health/ready", headers=headers)
         latency_ms = (time.perf_counter() - start) * 1000
         ok = r.status_code == 200
         return {
-            "status":     "ok" if ok else "degraded",
-            "backend":    _BACKEND,
-            "base_url":   _NIM_BASE,
-            "model":      _NIM_MODEL,
-            "latency_ms": round(latency_ms, 1),
+            "status":      "ok" if ok else "degraded",
+            "backend":     os.environ.get("BACKEND", "nim-hosted"),
+            "base_url":    base,
+            "model":       _NIM_MODEL,
+            "latency_ms":  round(latency_ms, 1),
             "http_status": r.status_code,
         }
     except Exception as e:
@@ -341,12 +348,11 @@ async def health():
 @app.get("/api/models")
 async def list_models():
     """Return allowed NIM models (Chinese-origin publishers filtered out)."""
-    headers = {}
-    if _AUTH_HEADER:
-        headers["Authorization"] = _AUTH_HEADER
+    auth = _auth_header()
+    headers = {"Authorization": auth} if auth else {}
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.get(f"{_NIM_BASE}/models", headers=headers)
+            r = await client.get(f"{_nim_base()}/models", headers=headers)
         r.raise_for_status()
         data   = r.json()
         models = [
